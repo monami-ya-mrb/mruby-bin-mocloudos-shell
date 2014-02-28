@@ -11,7 +11,6 @@
 ** immediately. It's a REPL...
 */
 
-
 #include <os.h>
 #include <xmalloc.h>
 #include <console.h>
@@ -21,21 +20,17 @@
 
 #include <stdlib.h>
 #include <string.h>
-
-#include <mruby.h>
+#include "mruby.h"
 #include "mruby/array.h"
-#include <mruby/proc.h>
-#include <mruby/data.h>
-#include <mruby/compile.h>
+#include "mruby/proc.h"
+#include "mruby/compile.h"
+#include "mruby/string.h"
+
 #ifdef ENABLE_READLINE
 #include <limits.h>
 #include <readline/readline.h>
 #include <readline/history.h>
-#endif
-#include <mruby/string.h>
 
- 
-#ifdef ENABLE_READLINE
 static const char *history_file_name = ".mirb_history";
 char history_path[PATH_MAX];
 #endif
@@ -59,10 +54,10 @@ p(mrb_state *mrb, mrb_value obj, int prompt, struct netconn *session)
 
 /* Guess if the user might want to enter more
  * or if he wants an evaluation of his code now */
-mrb_bool
+static mrb_bool
 is_code_block_open(struct mrb_parser_state *parser)
 {
-  int code_block_open = FALSE;
+  mrb_bool code_block_open = FALSE;
 
   /* check for heredoc */
   if (parser->parsing_heredoc != NULL) return TRUE;
@@ -232,14 +227,15 @@ cleanup(mrb_state *mrb, struct _args *args)
 static void
 print_hint(struct netconn *session)
 {
-  static char msg[] = "mirb - Embeddable Interactive Ruby Shell\n"
+  static char msg[] = "mocloudos-shell - based on Embeddable Interactive Ruby Shell\n"
     "\nThis is a very early version, please test and report errors.\n"
     "Thanks :)\n\n";
   netconn_write(session, msg, strlen(msg), NETCONN_COPY);
 }
 
+#ifndef ENABLE_READLINE
 /* Print the command line prompt of the REPL */
-void
+static void
 print_cmdline(int code_block_open, struct netconn *session)
 {
   if (code_block_open) {
@@ -249,6 +245,9 @@ print_cmdline(int code_block_open, struct netconn *session)
     netconn_write(session, "> ", 2, NETCONN_COPY);
   }
 }
+#endif 
+
+void mrb_codedump_all(mrb_state*, struct RProc*);
 
 int
 mirb_main(struct netconn *session, int argc, char **argv)
@@ -267,8 +266,9 @@ mirb_main(struct netconn *session, int argc, char **argv)
   mrb_value result;
   struct _args args;
   int n;
-  int code_block_open = FALSE;
+  mrb_bool code_block_open = FALSE;
   int ai;
+  unsigned int stack_keep = 0;
 
   /* new interpreter instance */
   mrb = mrb_open();
@@ -397,13 +397,18 @@ netread:
       }
       else {
         /* generate bytecode */
-        n = mrb_generate_code(mrb, parser);
+        struct RProc *proc = mrb_generate_code(mrb, parser);
 
+        if (args.verbose) {
+          mrb_codedump_all(mrb, proc);
+        }
+        /* pass a proc for evaulation */
         /* evaluate the bytecode */
-        result = mrb_run(mrb,
-            /* pass a proc for evaulation */
-            mrb_proc_new(mrb, mrb->irep[n]),
-            mrb_top_self(mrb));
+        result = mrb_context_run(mrb,
+            proc,
+            mrb_top_self(mrb),
+            stack_keep);
+        stack_keep = proc->body.irep->nlocals;
         /* did an exception occur? */
         if (mrb->exc) {
           p(mrb, mrb_obj_value(mrb->exc), 0, session);
@@ -411,7 +416,7 @@ netread:
         }
         else {
           /* no */
-          if (!mrb_respond_to(mrb, result, mrb_intern2(mrb, "inspect", 7))){
+          if (!mrb_respond_to(mrb, result, mrb_intern_lit(mrb, "inspect"))){
             result = mrb_any_to_s(mrb,result);
           }
           p(mrb, result, 1, session);
@@ -442,24 +447,6 @@ run_mirb(void *session)
   mirb_main(session, 1, &argv_base);
   (void) netconn_disconnect(session);
   (void) netconn_delete(session);
-}
-
-static int disk_fd[1];
-static void
-initialize_block_devices(void)
-{
-    struct blkfront_dev *blk_dev;
-    struct blkfront_info blk_info;
-
-    printf("Opening block device\n");
-
-    blk_dev = init_blkfront("device/vbd/769", &blk_info);
-    if (blk_dev) {
-	disk_fd[0] = blkfront_open(blk_dev);
-    } else {
-        disk_fd[0] = -1;
-        printf("Block devices #0 not found.\n");
-    }
 }
 
 int
