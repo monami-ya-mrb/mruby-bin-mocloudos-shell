@@ -458,8 +458,6 @@ main(int argc, char **argv)
     struct timeval tv;
     err_t rc;
 
-    initialize_block_devices();
-
     printf("Opening connection\n");
 
     listener = netconn_new(NETCONN_TCP);
