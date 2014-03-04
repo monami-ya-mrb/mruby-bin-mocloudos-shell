@@ -11,15 +11,12 @@
 ** immediately. It's a REPL...
 */
 
-#include <os.h>
-#include <xmalloc.h>
-#include <console.h>
-#include <netfront.h>
-#include <lwip/api.h>
-#include <blkfront.h>
-
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+
 #include "mruby.h"
 #include "mruby/array.h"
 #include "mruby/proc.h"
@@ -37,19 +34,19 @@ char history_path[PATH_MAX];
 
 
 static void
-p(mrb_state *mrb, mrb_value obj, int prompt, struct netconn *session)
+p(mrb_state *mrb, mrb_value obj, int prompt, int sessionfd)
 {
   obj = mrb_funcall(mrb, obj, "inspect", 0);
   if (prompt) {
     if (!mrb->exc) {
-      netconn_write(session, " => ", 4, NETCONN_COPY);
+      write(sessionfd, " => ", 4);
     }
     else {
       obj = mrb_funcall(mrb, mrb_obj_value(mrb->exc), "inspect", 0);
     }
   }
-  netconn_write(session, RSTRING_PTR(obj), RSTRING_LEN(obj), NETCONN_COPY);
-  netconn_write(session, "\n", 1, NETCONN_COPY);
+  write(sessionfd, RSTRING_PTR(obj), RSTRING_LEN(obj));
+  write(sessionfd, "\n", 1);
 }
 
 /* Guess if the user might want to enter more
@@ -225,24 +222,24 @@ cleanup(mrb_state *mrb, struct _args *args)
 
 /* Print a short remark for the user */
 static void
-print_hint(struct netconn *session)
+print_hint(int sessionfd)
 {
   static char msg[] = "mocloudos-shell - based on Embeddable Interactive Ruby Shell\n"
     "\nThis is a very early version, please test and report errors.\n"
     "Thanks :)\n\n";
-  netconn_write(session, msg, strlen(msg), NETCONN_COPY);
+  write(sessionfd, msg, strlen(msg));
 }
 
 #ifndef ENABLE_READLINE
 /* Print the command line prompt of the REPL */
 static void
-print_cmdline(int code_block_open, struct netconn *session)
+print_cmdline(int code_block_open, int sessionfd)
 {
   if (code_block_open) {
-    netconn_write(session, "* ", 2, NETCONN_COPY);
+    write(sessionfd, "* ", 2);
   }
   else {
-    netconn_write(session, "> ", 2, NETCONN_COPY);
+    write(sessionfd, "> ", 2);
   }
 }
 #endif 
@@ -250,12 +247,12 @@ print_cmdline(int code_block_open, struct netconn *session)
 void mrb_codedump_all(mrb_state*, struct RProc*);
 
 int
-mirb_main(struct netconn *session, int argc, char **argv)
+mirb_main(int sessionfd, int argc, char **argv)
 {
   char ruby_code[1024] = { 0 };
   char last_code_line[1024] = { 0 };
 #ifndef ENABLE_READLINE
-  int last_char;
+  char last_char;
   int char_index;
 #else
   char *home = NULL;
@@ -285,7 +282,7 @@ mirb_main(struct netconn *session, int argc, char **argv)
     return n;
   }
 
-  print_hint(session);
+  print_hint(sessionfd);
 
   cxt = mrbc_context_new(mrb);
   cxt->capture_errors = 1;
@@ -310,38 +307,32 @@ mirb_main(struct netconn *session, int argc, char **argv)
   }
 #endif
 
-  char *buf = NULL;
-  u16_t buflen = 0;
 
   while (TRUE) {
 #ifndef ENABLE_READLINE
-    struct netbuf *inbuf;
-
-    print_cmdline(code_block_open, session);
-netread:
-    if (buflen == 0) {
-      if (buf != NULL) {
-        netbuf_delete(inbuf);
-      }
-      inbuf = netconn_recv(session);
-      if (netconn_err(session) != ERR_OK) {
-        fprintf(stderr, "something wrong?");
-        break;
-      }
-      netbuf_data(inbuf, (void **)&buf, &buflen);
-    }
+    print_cmdline(code_block_open, sessionfd);
+  line_start:
     char_index = 0;
+    
     while (1) {
-      if (buflen-- == 0) {
-        goto netread;
+      int len;
+      len = read(sessionfd, &last_char, 1);
+      if (len == 0 || last_char == '\004') {
+	last_char = EOF;
+	break;
       }
-      last_char = *buf++;
-      if (last_char == '\n' ||
-          last_char == EOF) break;
-      last_code_line[char_index++] = last_char;
+      else if (last_char == '\n') {
+	break;
+      }
+      else if (last_char == '\003') {
+	goto line_start;
+      }
+      else {
+	last_code_line[char_index++] = last_char;
+      }
     }
     if (last_char == EOF) {
-      netconn_write(session, "\n", 1, NETCONN_COPY);
+      write(sessionfd, "\n", 1);
       break;
     }
 
@@ -393,7 +384,7 @@ netread:
         /* syntax error */
         char buf[4096];
         sprintf(buf, "line %d: %s\n", parser->error_buffer[0].lineno, parser->error_buffer[0].message);
-        netconn_write(session, buf, strlen(buf), NETCONN_COPY);
+        write(sessionfd, buf, strlen(buf));
       }
       else {
         /* generate bytecode */
@@ -411,7 +402,7 @@ netread:
         stack_keep = proc->body.irep->nlocals;
         /* did an exception occur? */
         if (mrb->exc) {
-          p(mrb, mrb_obj_value(mrb->exc), 0, session);
+          p(mrb, mrb_obj_value(mrb->exc), 0, sessionfd);
           mrb->exc = 0;
         }
         else {
@@ -419,7 +410,7 @@ netread:
           if (!mrb_respond_to(mrb, result, mrb_intern_lit(mrb, "inspect"))){
             result = mrb_any_to_s(mrb,result);
           }
-          p(mrb, result, 1, session);
+          p(mrb, result, 1, sessionfd);
         }
       }
       ruby_code[0] = '\0';
@@ -442,44 +433,54 @@ netread:
 static const char argv_base[] = "mirb";
 
 void
-run_mirb(void *session)
+run_mirb(void *p_sessionfd)
 {
-  mirb_main(session, 1, &argv_base);
-  (void) netconn_disconnect(session);
-  (void) netconn_delete(session);
+  int sessionfd = *(int *)p_sessionfd;
+  free(p_sessionfd);
+
+  mirb_main(sessionfd, 1, (char **)&argv_base);
+  (void) shutdown(sessionfd, 2);
+  (void) close(sessionfd);
 }
 
 int
 main(int argc, char **argv)
 {
-    struct ip_addr listenaddr = { 0 };
-    struct netconn *listener;
-    struct netconn *session;
-    struct timeval tv;
-    err_t rc;
+  int sockfd;
+  struct sockaddr_in sin;
+  const unsigned short port = 25;
 
-    printf("Opening connection\n");
+  printf("Opening connection\n");
 
-    listener = netconn_new(NETCONN_TCP);
-    printf("Connection at %p\n", listener);
+  sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
-    rc = netconn_bind(listener, &listenaddr, 13);
-    if (rc != ERR_OK) {
-        printf("Failed to bind connection: %i\n", rc);
-        return rc;
+  sin.sin_family = PF_INET;
+  sin.sin_port = htons(port);
+  sin.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(sockfd, (struct sockaddr *)&sin, sizeof(struct sockaddr_in)) < 0) {
+    close(sockfd);
+    return 1;
+  }
+
+  if (listen(sockfd, 2) < 0) {
+    close(sockfd);
+    return 1;
+  }
+
+  while (1) {
+    int *p_acceptfd;
+    struct sockaddr_in addr;
+    socklen_t addr_len;
+
+    p_acceptfd = malloc(sizeof(int));
+    *p_acceptfd = accept(sockfd, (struct sockaddr *)&addr, &addr_len);
+
+    if (*p_acceptfd < 0) {
+      break;
     }
-    rc = netconn_listen(listener);
-    if (rc != ERR_OK) {
-        printf("Failed to listen on connection: %i\n", rc);
-        return rc;
-    }
 
-    while (1) {
-        session = netconn_accept(listener);
-        if (session == NULL) 
-            continue;
-	create_thread("mirb", run_mirb, session);
-    }
+    create_thread("mirb", run_mirb, p_acceptfd);
+  }
 
     return 0;
 }
