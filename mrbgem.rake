@@ -1,5 +1,5 @@
 MRuby::Gem::Specification.new('mruby-bin-mocloudos-shell') do |spec|
-  spec.license = 'Proprietary'
+  spec.license = 'MIT'
   spec.author  = 'Monami-ya LLC, Japan'
 
 
